@@ -1,0 +1,9 @@
+.venv/
+.idea/
+__pycache__/
+*.pyc
+
+store_key_all.txt
+*.xlsx
+*.xls
+*.csv
