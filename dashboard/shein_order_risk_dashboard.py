@@ -551,6 +551,12 @@ category_options = [
     "已超时/已延迟",
 ]
 
+# 店铺名称动态读取
+store_values = sorted(
+    [safe_str(v) for v in df[COL_STORE].dropna().unique().tolist() if safe_str(v)]
+)
+store_options = ["全部"] + store_values
+
 # 平台原始状态动态读取
 status_values = sorted(
     [safe_str(v) for v in df[COL_STATUS].dropna().unique().tolist() if safe_str(v)]
@@ -563,7 +569,9 @@ level_options = ["全部"] + sorted(
     key=risk_level_sort
 )
 
-f1, f2, f3, f4 = st.columns([1.15, 1.15, 1.0, 1.7])
+# 五个筛选项：
+# 统计/风险类型 | 店铺名称 | 平台原始状态 | 风险等级 | 搜索订单号/运单号/物流信息
+f1, f2, f3, f4, f5 = st.columns([1.15, 1.2, 1.15, 1.0, 1.75])
 
 with f1:
     category_filter = st.selectbox(
@@ -573,31 +581,41 @@ with f1:
     )
 
 with f2:
+    store_filter = st.selectbox(
+        "店铺名称",
+        store_options,
+        index=0,
+    )
+
+with f3:
     status_filter = st.selectbox(
         "平台原始状态",
         status_options,
         index=0,
     )
 
-with f3:
+with f4:
     level_filter = st.selectbox(
         "风险等级",
         level_options,
         index=0,
     )
 
-with f4:
+with f5:
     keyword = st.text_input(
-        "搜索订单号 / 运单号 / 店铺 / 物流信息"
+        "搜索订单号 / 运单号 / 物流信息"
     )
 
 
 def apply_base_filters(frame):
     """
-    先按平台原始状态、风险等级、关键字过滤。
+    先按店铺名称、平台原始状态、风险等级、关键字过滤。
     顶部统计卡片会基于这些筛选条件重新计数。
     """
     out = frame.copy()
+
+    if store_filter != "全部":
+        out = out[out["店铺"].astype(str) == store_filter]
 
     if status_filter != "全部":
         out = out[out["平台原始状态"].astype(str) == status_filter]
@@ -610,7 +628,6 @@ def apply_base_filters(frame):
         mask = (
             out["订单编号"].astype(str).str.contains(kw, case=False, na=False)
             | out["运单号"].astype(str).str.contains(kw, case=False, na=False)
-            | out["店铺"].astype(str).str.contains(kw, case=False, na=False)
             | out["物流信息"].astype(str).str.contains(kw, case=False, na=False)
         )
         out = out[mask]
@@ -725,6 +742,12 @@ display_cols = [
 ]
 
 show_df = show_df[[c for c in display_cols if c in show_df.columns]]
+
+# 左侧序号按“当前筛选后的结果”重新排序，不沿用 Excel 原始行号或旧 DataFrame 索引。
+# 每次切换店铺 / 状态 / 风险等级 / 风险类型 / 关键字后，都会重新从 1 开始编号。
+show_df = show_df.reset_index(drop=True)
+show_df.index = range(1, len(show_df) + 1)
+show_df.index.name = "序号"
 
 st.dataframe(
     show_df.style.map(color_level, subset=["风险等级"]),
