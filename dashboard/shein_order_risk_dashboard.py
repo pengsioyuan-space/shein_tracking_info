@@ -18,7 +18,7 @@ SHEIN 订单超时风险网页版看板
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -26,6 +26,10 @@ import streamlit as st
 
 
 LA_TZ = ZoneInfo("America/Los_Angeles")
+
+# 美区时间指标统一规则：
+# True = 跳过美国节假日及观察假日；周六周日始终跳过。
+SKIP_US_HOLIDAYS = True
 
 
 # =========================
@@ -98,16 +102,140 @@ def parse_dt(v):
         return None
 
 
+def nth_weekday_of_month(year, month, weekday, n):
+    d = datetime(year, month, 1)
+    while d.weekday() != weekday:
+        d += timedelta(days=1)
+    return (d + timedelta(days=7 * (n - 1))).date()
+
+
+def last_weekday_of_month(year, month, weekday):
+    if month == 12:
+        d = datetime(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        d = datetime(year, month + 1, 1) - timedelta(days=1)
+
+    while d.weekday() != weekday:
+        d -= timedelta(days=1)
+
+    return d.date()
+
+
+def observed_date(year, month, day):
+    """
+    美国常见观察假日：
+    - 节日落周六 -> 前一个周五观察
+    - 节日落周日 -> 下一个周一观察
+    """
+    d = datetime(year, month, day).date()
+
+    if d.weekday() == 5:
+        return d - timedelta(days=1)
+
+    if d.weekday() == 6:
+        return d + timedelta(days=1)
+
+    return d
+
+
+def us_holidays(year):
+    """
+    与订单导出脚本保持一致的美国常见节假日/观察假日集合。
+    """
+    return {
+        observed_date(year, 1, 1),                    # New Year's Day
+        nth_weekday_of_month(year, 1, 0, 3),          # MLK Day
+        nth_weekday_of_month(year, 2, 0, 3),          # Presidents' Day
+        last_weekday_of_month(year, 5, 0),            # Memorial Day
+        observed_date(year, 6, 19),                   # Juneteenth
+        observed_date(year, 7, 4),                    # Independence Day
+        nth_weekday_of_month(year, 9, 0, 1),          # Labor Day
+        nth_weekday_of_month(year, 10, 0, 2),         # Columbus Day
+        observed_date(year, 11, 11),                  # Veterans Day
+        nth_weekday_of_month(year, 11, 3, 4),         # Thanksgiving
+        observed_date(year, 12, 25),                  # Christmas
+    }
+
+
+def is_business_day_la(local_dt):
+    """
+    洛杉矶有效计时日：
+    - 周六不计时
+    - 周日不计时
+    - SKIP_US_HOLIDAYS=True 时，美国节假日/观察假日不计时
+    """
+    if local_dt.weekday() >= 5:
+        return False
+
+    if SKIP_US_HOLIDAYS and local_dt.date() in us_holidays(local_dt.year):
+        return False
+
+    return True
+
+
+def business_hours_between(start_dt, end_dt):
+    """
+    计算两个“洛杉矶本地 naive datetime”之间的有效小时数。
+
+    规则：
+    - 周六、周日整段不累计
+    - 美国节假日/观察假日整段不累计
+    - 下一工作日继续累计
+    - 返回可正可负的小时数
+    """
+    if not start_dt or not end_dt:
+        return None
+
+    if start_dt == end_dt:
+        return 0.0
+
+    sign = 1.0
+    if end_dt < start_dt:
+        start_dt, end_dt = end_dt, start_dt
+        sign = -1.0
+
+    total_seconds = 0.0
+    cur = start_dt
+
+    while cur < end_dt:
+        next_day = (
+            cur.replace(hour=0, minute=0, second=0, microsecond=0)
+            + timedelta(days=1)
+        )
+        segment_end = min(next_day, end_dt)
+
+        if is_business_day_la(cur):
+            total_seconds += (segment_end - cur).total_seconds()
+
+        cur = segment_end
+
+    return sign * (total_seconds / 3600.0)
+
+
 def hours_passed(start_dt, current_dt):
+    """
+    已过去有效小时数：
+    当前洛杉矶时间 - 起始时间，
+    但周末/美国节假日/观察假日不累计。
+    """
     if not start_dt:
         return None
-    return (current_dt - start_dt).total_seconds() / 3600
+
+    return business_hours_between(start_dt, current_dt)
 
 
 def hours_left(target_dt, current_dt):
+    """
+    剩余有效小时数：
+    目标时间 - 当前洛杉矶时间，
+    但周末/美国节假日/观察假日不累计。
+
+    若已超过目标时间，返回负数。
+    """
     if not target_dt:
         return None
-    return (target_dt - current_dt).total_seconds() / 3600
+
+    return business_hours_between(current_dt, target_dt)
 
 
 def is_empty(v) -> bool:
@@ -385,7 +513,7 @@ with st.sidebar:
 
     uploaded = st.file_uploader("上传订单物流状态跟踪表 Excel", type=["xlsx", "xls"])
 
-    st.caption("规则：表格时间按洛杉矶时间处理。")
+    st.caption("规则：表格时间按洛杉矶时间处理；时间指标跳过周六、周日、美国节假日及观察假日。")
 
 
 if not uploaded:
@@ -620,36 +748,45 @@ with st.expander("查看规则说明"):
 ### 当前规则
 
 1. **待处理状态**
-- 当前洛杉矶时间 - 订单创建时间
+- 当前洛杉矶时间 - 订单创建时间（仅累计有效工作时间）
 - 12-18小时：黄色，即将处理超时
 - 18-24小时：红色，即将处理超时
 - 超过24小时：已处理超时
 
 2. **待处理 / 待发货状态**
-- 当前洛杉矶时间 - 订单创建时间
+- 当前洛杉矶时间 - 订单创建时间（仅累计有效工作时间）
 - 运单号为空才判断
 - 24-36小时：黄色，即将发货超时
 - 36-48小时：红色，即将发货超时
 - 超过48小时：已发货超时
 
 3. **待揽收状态：第一次超时未揽收**
-- 当前洛杉矶时间 - 订单创建时间
+- 当前洛杉矶时间 - 订单创建时间（仅累计有效工作时间）
 - 物流未从“已创建面单/已创建发货标签”进入下一阶段
 - 44-48小时：黄色，即将延迟交付
 - 超过48小时：红色，已延迟交付
 
 4. **待揽收状态：待揽收超时**
-- 待揽收超时时间 - 当前洛杉矶时间
+- 待揽收超时时间 - 当前洛杉矶时间（仅累计有效工作时间）
 - 物流未出现已揽收/运输中/到达/离开等后续轨迹
 - 剩余24小时内：黄色，即将揽收超时
 - 剩余12小时内：红色，即将揽收超时
 - 小于等于0：已揽收超时
 
 5. **已发货状态：到货超时**
-- 要求签收时间 - 当前洛杉矶时间
+- 要求签收时间 - 当前洛杉矶时间（仅累计有效工作时间）
 - 物流未签收
 - 剩余24小时内：黄色，即将到货超时
 - 剩余12小时内：红色，即将到货超时
 - 小于等于0：已到货超时
+
+6. **统一时间指标规则**
+- 所有“已过去 X 小时 / 剩余 X 小时 / 已超时 X 小时”
+- 均按洛杉矶本地日期判断
+- 周六、周日不累计
+- 美国节假日不累计
+- 美国观察假日不累计
+- 下一工作日继续累计
+
         """
     )
