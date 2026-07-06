@@ -406,27 +406,127 @@ if missing:
 
 risk_df = analyze_dataframe(df, current_dt)
 
-st.subheader("风险统计")
+# =========================
+# 风险明细筛选
+# =========================
+
+st.subheader("风险明细")
+
+# 第一项改成与顶部统计卡片一致的业务分类
+category_options = [
+    "订单总数",
+    "即将处理超时",
+    "即将发货超时",
+    "即将延迟交付",
+    "即将揽收超时",
+    "即将到货超时",
+    "已超时/已延迟",
+]
+
+# 平台原始状态动态读取
+status_values = sorted(
+    [safe_str(v) for v in df[COL_STATUS].dropna().unique().tolist() if safe_str(v)]
+)
+status_options = ["全部"] + status_values
+
+# 风险等级保留
+level_options = ["全部"] + sorted(
+    risk_df["风险等级"].dropna().unique().tolist(),
+    key=risk_level_sort
+)
+
+f1, f2, f3, f4 = st.columns([1.15, 1.15, 1.0, 1.7])
+
+with f1:
+    category_filter = st.selectbox(
+        "统计/风险类型",
+        category_options,
+        index=0,
+    )
+
+with f2:
+    status_filter = st.selectbox(
+        "平台原始状态",
+        status_options,
+        index=0,
+    )
+
+with f3:
+    level_filter = st.selectbox(
+        "风险等级",
+        level_options,
+        index=0,
+    )
+
+with f4:
+    keyword = st.text_input(
+        "搜索订单号 / 运单号 / 店铺 / 物流信息"
+    )
 
 
-def count_risk(name):
-    return int((risk_df["风险类型"] == name).sum())
+def apply_base_filters(frame):
+    """
+    先按平台原始状态、风险等级、关键字过滤。
+    顶部统计卡片会基于这些筛选条件重新计数。
+    """
+    out = frame.copy()
+
+    if status_filter != "全部":
+        out = out[out["平台原始状态"].astype(str) == status_filter]
+
+    if level_filter != "全部":
+        out = out[out["风险等级"] == level_filter]
+
+    if keyword.strip():
+        kw = keyword.strip()
+        mask = (
+            out["订单编号"].astype(str).str.contains(kw, case=False, na=False)
+            | out["运单号"].astype(str).str.contains(kw, case=False, na=False)
+            | out["店铺"].astype(str).str.contains(kw, case=False, na=False)
+            | out["物流信息"].astype(str).str.contains(kw, case=False, na=False)
+        )
+        out = out[mask]
+
+    return out
 
 
-cards = [
-    ("订单总数", len(df)),
-    ("即将处理超时", count_risk("即将处理超时")),
-    ("即将发货超时", count_risk("即将发货超时")),
-    ("即将延迟交付", count_risk("即将延迟交付")),
-    ("即将揽收超时", count_risk("即将揽收超时")),
-    ("即将到货超时", count_risk("即将到货超时")),
-    ("已超时/已延迟", int(risk_df["风险类型"].isin([
+base_filtered_df = apply_base_filters(risk_df)
+
+
+def count_risk_in(frame, name):
+    return int((frame["风险类型"] == name).sum())
+
+
+def count_timeout_group(frame):
+    return int(frame["风险类型"].isin([
         "已处理超时",
         "已发货超时",
         "已延迟交付",
         "已揽收超时",
         "已到货超时",
-    ]).sum())),
+    ]).sum())
+
+
+# “订单总数”按唯一订单号重新计数，避免一个订单多个风险被重复统计
+filtered_order_count = int(
+    base_filtered_df["订单编号"].astype(str).nunique()
+) if not base_filtered_df.empty else 0
+
+
+# =========================
+# 风险统计：每次筛选后重新计数
+# =========================
+
+st.subheader("风险统计")
+
+cards = [
+    ("订单总数", filtered_order_count),
+    ("即将处理超时", count_risk_in(base_filtered_df, "即将处理超时")),
+    ("即将发货超时", count_risk_in(base_filtered_df, "即将发货超时")),
+    ("即将延迟交付", count_risk_in(base_filtered_df, "即将延迟交付")),
+    ("即将揽收超时", count_risk_in(base_filtered_df, "即将揽收超时")),
+    ("即将到货超时", count_risk_in(base_filtered_df, "即将到货超时")),
+    ("已超时/已延迟", count_timeout_group(base_filtered_df)),
 ]
 
 cols = st.columns(len(cards))
@@ -435,40 +535,48 @@ for col, (name, value) in zip(cols, cards):
 
 st.divider()
 
-st.subheader("风险明细")
 
-left, mid, right = st.columns([1, 1, 1])
+# =========================
+# 根据“统计/风险类型”重新筛选并重新排序
+# =========================
 
-risk_options = ["全部"] + sorted(risk_df["风险类型"].dropna().unique().tolist())
-level_options = ["全部"] + sorted(risk_df["风险等级"].dropna().unique().tolist(), key=risk_level_sort)
+show_df = base_filtered_df.copy()
 
-with left:
-    risk_filter = st.selectbox("风险类型", risk_options)
+if category_filter == "即将处理超时":
+    show_df = show_df[show_df["风险类型"] == "即将处理超时"]
 
-with mid:
-    level_filter = st.selectbox("风险等级", level_options)
+elif category_filter == "即将发货超时":
+    show_df = show_df[show_df["风险类型"] == "即将发货超时"]
 
-with right:
-    keyword = st.text_input("搜索订单号 / 运单号 / 店铺 / 物流信息")
+elif category_filter == "即将延迟交付":
+    show_df = show_df[show_df["风险类型"] == "即将延迟交付"]
 
-show_df = risk_df.copy()
+elif category_filter == "即将揽收超时":
+    show_df = show_df[show_df["风险类型"] == "即将揽收超时"]
 
-if risk_filter != "全部":
-    show_df = show_df[show_df["风险类型"] == risk_filter]
+elif category_filter == "即将到货超时":
+    show_df = show_df[show_df["风险类型"] == "即将到货超时"]
 
-if level_filter != "全部":
-    show_df = show_df[show_df["风险等级"] == level_filter]
+elif category_filter == "已超时/已延迟":
+    show_df = show_df[show_df["风险类型"].isin([
+        "已处理超时",
+        "已发货超时",
+        "已延迟交付",
+        "已揽收超时",
+        "已到货超时",
+    ])]
 
-if keyword.strip():
-    kw = keyword.strip()
-    mask = (
-        show_df["订单编号"].astype(str).str.contains(kw, case=False, na=False)
-        | show_df["运单号"].astype(str).str.contains(kw, case=False, na=False)
-        | show_df["店铺"].astype(str).str.contains(kw, case=False, na=False)
-        | show_df["物流信息"].astype(str).str.contains(kw, case=False, na=False)
+# 订单总数 = 展示全部筛选后的订单风险明细
+# 每次切换选项后，重新按风险等级和时间指标排列，而不是依赖表格手工排序
+if not show_df.empty:
+    show_df = show_df.copy()
+    show_df["_风险等级排序"] = show_df["风险等级"].map(risk_level_sort)
+    show_df = show_df.sort_values(
+        by=["_风险等级排序", "风险类型", "订单创建时间", "订单编号"],
+        ascending=[True, True, True, True],
+        kind="stable",
     )
-    show_df = show_df[mask]
-
+    show_df = show_df.drop(columns=["_风险等级排序"], errors="ignore")
 
 display_cols = [
     "风险类型",
