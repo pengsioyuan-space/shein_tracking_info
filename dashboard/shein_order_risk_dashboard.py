@@ -18,6 +18,7 @@ SHEIN 订单超时风险网页版看板
 """
 
 import re
+from io import BytesIO
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -236,6 +237,19 @@ def hours_left(target_dt, current_dt):
         return None
 
     return business_hours_between(current_dt, target_dt)
+
+
+def split_multi_query(text_value):
+    """
+    多值搜索拆分：
+    支持英文/中文逗号、分号、竖线、换行、Tab。
+    """
+    s = safe_str(text_value)
+    if not s:
+        return []
+
+    parts = re.split(r"[,，;；|\s]+", s)
+    return [p.strip() for p in parts if p.strip()]
 
 
 def is_empty(v) -> bool:
@@ -532,6 +546,109 @@ def color_level(val):
     return ""
 
 
+def dataframe_to_xlsx_bytes(frame: pd.DataFrame) -> bytes:
+    """
+    导出当前筛选结果为 Excel，并修复时间格式问题。
+
+    规则：
+    - 所有时间列统一按文本写入；
+    - 避免 WPS/Excel 自动日期格式导致 #######；
+    - 设置合理列宽；
+    - 保留筛选后的序号；
+    - 冻结首行并启用自动筛选。
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    export_df = frame.copy()
+
+    # 当前展示已经是 1..N 序号，这里保留下来
+    export_df = export_df.reset_index()
+    if export_df.columns[0] != "序号":
+        export_df = export_df.rename(columns={export_df.columns[0]: "序号"})
+
+    time_columns = [
+        "订单创建时间",
+        "打印面单时间",
+        "待处理超时时间",
+        "待发货超时时间",
+        "待揽收超时时间",
+        "要求签收时间",
+    ]
+
+    # 时间列全部变成字符串，防止 Excel/WPS 自动转日期
+    for col in time_columns:
+        if col in export_df.columns:
+            export_df[col] = export_df[col].apply(
+                lambda v: "" if pd.isna(v) else str(v)
+            )
+
+    export_df = export_df.fillna("")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "筛选结果"
+
+    header_fill = PatternFill("solid", fgColor="D9EAF7")
+    thin = Side(style="thin", color="D0D0D0")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # 表头
+    for c, col in enumerate(export_df.columns, 1):
+        cell = ws.cell(row=1, column=c, value=str(col))
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+
+    # 数据
+    for r_idx, row in enumerate(export_df.itertuples(index=False), 2):
+        for c_idx, value in enumerate(row, 1):
+            col_name = str(export_df.columns[c_idx - 1])
+
+            if col_name in time_columns:
+                # 前置单引号不是必须；number_format='@' 即可强制文本
+                value = "" if value in [None, ""] else str(value)
+
+            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center")
+
+            if col_name in time_columns:
+                cell.number_format = "@"
+
+    width_map = {
+        "序号": 8,
+        "风险类型": 16,
+        "风险等级": 10,
+        "时间指标": 22,
+        "建议操作": 42,
+        "店铺": 24,
+        "订单编号": 24,
+        "平台原始状态": 16,
+        "订单创建时间": 22,
+        "打印面单时间": 22,
+        "待处理超时时间": 22,
+        "待发货超时时间": 22,
+        "待揽收超时时间": 22,
+        "要求签收时间": 22,
+        "运单号": 30,
+        "物流信息": 42,
+    }
+
+    for i, col in enumerate(export_df.columns, 1):
+        ws.column_dimensions[get_column_letter(i)].width = width_map.get(str(col), 18)
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
+
 # =========================
 # 页面
 # =========================
@@ -547,7 +664,7 @@ with st.sidebar:
 
     uploaded = st.file_uploader("上传订单物流状态跟踪表 Excel", type=["xlsx", "xls"])
 
-    st.caption("规则：表格时间按洛杉矶时间处理；时间指标跳过周六、周日、美国节假日及观察假日。")
+    st.caption("规则：表格时间按洛杉矶时间处理；时间指标跳过周六、周日、美国节假日及观察假日。店铺可多选；搜索框支持多个订单号/运单号/物流关键词。导出 Excel 时间列按文本保存。")
 
 
 if not uploaded:
@@ -604,8 +721,8 @@ level_options = ["全部"] + sorted(
 )
 
 # 五个筛选项：
-# 统计/风险类型 | 店铺名称 | 平台原始状态 | 风险等级 | 搜索订单号/运单号/物流信息
-f1, f2, f3, f4, f5 = st.columns([1.15, 1.2, 1.15, 1.0, 1.75])
+# 统计/风险类型 | 店铺名称（可多选） | 平台原始状态 | 风险等级 | 搜索订单号/运单号/物流信息（可输入多个订单）
+f1, f2, f3, f4, f5 = st.columns([1.1, 1.35, 1.1, 0.95, 1.9])
 
 with f1:
     category_filter = st.selectbox(
@@ -615,10 +732,11 @@ with f1:
     )
 
 with f2:
-    store_filter = st.selectbox(
+    store_filter = st.multiselect(
         "店铺名称",
-        store_options,
-        index=0,
+        store_values,
+        default=[],
+        placeholder="可选择多个店铺"
     )
 
 with f3:
@@ -637,19 +755,21 @@ with f4:
 
 with f5:
     keyword = st.text_input(
-        "搜索订单号 / 运单号 / 物流信息"
+        "搜索订单号 / 运单号 / 物流信息",
+        placeholder="可输入多个订单号，逗号/换行分隔"
     )
 
 
 def apply_base_filters(frame):
     """
-    先按店铺名称、平台原始状态、风险等级、关键字过滤。
+    先按多店铺、平台原始状态、风险等级、关键字过滤。
     顶部统计卡片会基于这些筛选条件重新计数。
     """
     out = frame.copy()
 
-    if store_filter != "全部":
-        out = out[out["店铺"].astype(str) == store_filter]
+    # 店铺名称支持多选；未选择表示全部
+    if store_filter:
+        out = out[out["店铺"].astype(str).isin(store_filter)]
 
     if status_filter != "全部":
         out = out[out["平台原始状态"].astype(str) == status_filter]
@@ -657,13 +777,24 @@ def apply_base_filters(frame):
     if level_filter != "全部":
         out = out[out["风险等级"] == level_filter]
 
-    if keyword.strip():
-        kw = keyword.strip()
-        mask = (
-            out["订单编号"].astype(str).str.contains(kw, case=False, na=False)
-            | out["运单号"].astype(str).str.contains(kw, case=False, na=False)
-            | out["物流信息"].astype(str).str.contains(kw, case=False, na=False)
-        )
+    # 搜索框支持多个订单号 / 运单号 / 物流关键词，多个词之间为 OR
+    query_terms = split_multi_query(keyword)
+
+    if query_terms:
+        order_series = out["订单编号"].astype(str)
+        waybill_series = out["运单号"].astype(str)
+        logistics_series = out["物流信息"].astype(str)
+
+        mask = pd.Series(False, index=out.index)
+
+        for term in query_terms:
+            mask = (
+                mask
+                | order_series.str.contains(term, case=False, na=False, regex=False)
+                | waybill_series.str.contains(term, case=False, na=False, regex=False)
+                | logistics_series.str.contains(term, case=False, na=False, regex=False)
+            )
+
         out = out[mask]
 
     return out
@@ -789,12 +920,13 @@ st.dataframe(
     height=620,
 )
 
-csv = show_df.to_csv(index=False, encoding="utf-8-sig")
+xlsx_bytes = dataframe_to_xlsx_bytes(show_df)
+
 st.download_button(
-    "下载当前筛选结果 CSV",
-    data=csv,
-    file_name=f"shein_order_risk_result_{current_dt.strftime('%Y%m%d_%H%M%S')}.csv",
-    mime="text/csv",
+    "下载当前筛选结果 Excel",
+    data=xlsx_bytes,
+    file_name=f"shein_order_risk_result_{current_dt.strftime('%Y%m%d_%H%M%S')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
 st.divider()
