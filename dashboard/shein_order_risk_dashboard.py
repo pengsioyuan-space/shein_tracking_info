@@ -365,10 +365,20 @@ def analyze_one_order(row, current_dt):
     risks = []
 
     if status == "已签收":
-        return [{"风险类型": "已完成", "风险等级": "灰色", "时间指标": "", "建议操作": "订单已签收，无需处理。"}]
+        return [{
+            "风险类型": "已完成",
+            "风险等级": "灰色",
+            "时间指标": "",
+            "建议操作": "订单已签收，无需处理。"
+        }]
 
     if status in ["取消", "退款"] or not is_empty(row.get(COL_REFUND_TIME, "")):
-        return [{"风险类型": "已取消/已退款", "风险等级": "灰色", "时间指标": "", "建议操作": "订单已取消或退款，无需处理。"}]
+        return [{
+            "风险类型": "已取消/已退款",
+            "风险等级": "灰色",
+            "时间指标": "",
+            "建议操作": "订单已取消或退款，无需处理。"
+        }]
 
     # 1. 即将处理超时：待处理，按订单创建时间正向计算
     if status == "待处理" and age_h is not None:
@@ -418,7 +428,31 @@ def analyze_one_order(row, current_dt):
             add_risk(risks, "即将到货超时", "黄色", f"剩余 {format_hours(left_h)}", "24小时内即将到货超时，关注物流是否正常派送。")
 
     if not risks:
-        return [{"风险类型": "正常", "风险等级": "绿色", "时间指标": "", "建议操作": "暂无需要优先处理的风险。"}]
+        metric = "当前正常"
+
+        # 待处理 / 待发货 / 待揽收：显示有效已过去小时数
+        if status in ["待处理", "待发货", "待揽收"] and age_h is not None:
+            metric = f"已过去 {format_hours(age_h)}"
+
+        # 已发货：优先显示距离要求签收的有效剩余小时数
+        elif status == "已发货" and require_sign_time:
+            left_h = hours_left(require_sign_time, current_dt)
+            if left_h is not None:
+                if left_h >= 0:
+                    metric = f"剩余 {format_hours(left_h)}"
+                else:
+                    metric = f"已超时 {format_hours(abs(left_h))}"
+
+        # 其它仍可按订单创建时间显示有效已过去小时数
+        elif age_h is not None:
+            metric = f"已过去 {format_hours(age_h)}"
+
+        return [{
+            "风险类型": "正常",
+            "风险等级": "绿色",
+            "时间指标": metric,
+            "建议操作": "暂无需要优先处理的风险。"
+        }]
 
     return risks
 
@@ -768,6 +802,13 @@ st.divider()
 with st.expander("查看规则说明"):
     st.markdown(
         """
+### 风险颜色说明
+
+- **红色**：高风险 / 已超时 / 距离超时很近，需要优先处理
+- **黄色**：预警风险，需要关注
+- **绿色**：当前正常，但仍显示时间指标
+- **灰色**：流程已结束，例如已签收、已取消、已退款；时间指标留空
+
 ### 当前规则
 
 1. **待处理状态**
